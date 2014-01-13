@@ -8,9 +8,6 @@
    certain rights in this software.  This software is distributed under
    the GNU General Public License.
 
-   LAMMPS-HESSIAN - Copyright (2014) Anthony B. Costa.
-   anthony.costa@numericalsolutions.org, Numerical Solutions, Inc.
-
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
