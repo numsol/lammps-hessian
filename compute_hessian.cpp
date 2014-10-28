@@ -8,6 +8,13 @@
    certain rights in this software.  This software is distributed under
    the GNU General Public License.
 
+   LAMMPS-HESSIAN - Copyright (2014) Anthony B. Costa.
+   anthony.costa@numericalsolutions.org, Numerical Solutions, Inc.
+
+   A compute module for the LAMMPS software package  which provides a 
+   method of generating the forward-difference numerical Hessian matrix 
+   on the fly duing any LAMMPS simulation.
+
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
@@ -15,6 +22,7 @@
 #include "math.h"
 #include "string.h"
 #include "stdlib.h"
+#include "neighbor.h"
 #include "compute_hessian.h"
 #include "atom.h"
 #include "error.h"
@@ -217,6 +225,9 @@ void ComputeHessian::compute_vector(void) {
   else
     kspace_compute_flag = 0;
 
+  comm->forward_comm();
+  if (modify->n_pre_force) modify->pre_force(vflag);
+
   /* do numerical hessian compute by forward differences. */
   for (int i = 1; i <= atom->natoms; i++) {
 
@@ -241,35 +252,22 @@ void ComputeHessian::compute_vector(void) {
 
     for (int j = 0; j < domain->dimension; j++) {
       /* increment the dof by epsilon on the right task. */
-      if (myatom)
-        xlocal[m][j] += epsilon;
+      if (myatom) xlocal[m][j] += epsilon;
 
       /* standard force call. */
-      comm->forward_comm();
       force_clear();
 
-      if (modify->n_pre_force)
-        modify->pre_force(vflag);
-
-      if (pair_compute_flag)
-        force->pair->compute(eflag, vflag);
+      if (pair_compute_flag) force->pair->compute(eflag, vflag);
 
       if (atom->molecular) {
-        if (force->bond)
-          force->bond->compute(eflag, vflag);
-        if (force->angle)
-          force->angle->compute(eflag, vflag);
-        if (force->dihedral)
-          force->dihedral->compute(eflag, vflag);
-        if (force->improper)
-          force->improper->compute(eflag, vflag);
+        if (force->bond) force->bond->compute(eflag, vflag);
+        if (force->angle) force->angle->compute(eflag, vflag);
+        if (force->dihedral) force->dihedral->compute(eflag, vflag);
+        if (force->improper) force->improper->compute(eflag, vflag);
       }
 
-      if (kspace_compute_flag)
-        force->kspace->compute(eflag, vflag);
+      if (kspace_compute_flag) force->kspace->compute(eflag, vflag);
 
-      if (modify->n_post_force)
-        modify->post_force(vflag);
 
       /* put the original position back. */
       if (myatom)
@@ -311,6 +309,9 @@ void ComputeHessian::compute_vector(void) {
       }
     }
   }
+
+  if (force->newton) comm->reverse_comm();
+  if (modify->n_post_force) modify->post_force(vflag);
 
   /* only reduce the hessian to the root task. */
   MPI_Reduce(MPI_IN_PLACE, hessian, nhessianelements, MPI_DOUBLE, MPI_SUM, 0, world);
