@@ -96,7 +96,7 @@ void ComputeHessian::compute_vector(void) {
 
   /* set flags for what arrays to clear in force_clear(). */
   /* if they exist they are cleared and then replaced later. */
-  torqueflag = erforceflag = e_flag = rho_flag = 1;
+  torqueflag = erforceflag = e_flag = rho_flag = 0;
   if (atom->torque_flag)
     torqueflag = 1;
   if (atom->erforce_flag)
