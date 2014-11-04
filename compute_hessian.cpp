@@ -89,14 +89,14 @@ void ComputeHessian::compute_vector(void) {
   /* tags must be defined and consecutive. */
   if (atom->tag_enable == 0)
     error->all(FLERR,
-               "Cannot use velocity create loop all unless atoms have IDs");
+               "Cannot use Hessian compute unless atoms have IDs");
   if (atom->tag_consecutive() == 0)
     error->all(FLERR,
-               "Atom IDs must be consecutive for velocity create loop all");
+               "Atom IDs must be consecutive for Hessian compute");
 
   /* set flags for what arrays to clear in force_clear(). */
   /* if they exist they are cleared and then replaced later. */
-  torqueflag = erforceflag = e_flag = rho_flag = 0;
+  torqueflag = erforceflag = e_flag = rho_flag = 1;
   if (atom->torque_flag)
     torqueflag = 1;
   if (atom->erforce_flag)
@@ -127,13 +127,13 @@ void ComputeHessian::compute_vector(void) {
     memory->grow(flocal, needlocalsize, 3, "hessian:flocal");
 
     if (torqueflag)
-      memory->grow(torquelocal, needlocalsize, 3, "hessian:torque");
+      memory->grow(torquelocal, needlocalsize, 3, "hessian:torquelocal");
     if (erforceflag)
-      memory->grow(erforcelocal, needlocalsize, "hessian:erforce");
+      memory->grow(erforcelocal, needlocalsize, "hessian:erforcelocal");
     if (e_flag)
-      memory->grow(delocal, needlocalsize, "hessian:de");
+      memory->grow(delocal, needlocalsize, "hessian:delocal");
     if (rho_flag)
-      memory->grow(drholocal, needlocalsize, "hessian:drho");
+      memory->grow(drholocal, needlocalsize, "hessian:drholocal");
 
     mylocalsize = needlocalsize;
   }
@@ -173,28 +173,6 @@ void ComputeHessian::compute_vector(void) {
   atom->de = delocal;
   atom->drho = drholocal;
 
-  /* construct fglobal_ref by explicit scatter and reduce to preserve atom-id
-   * ordering. */
-  int reduce_id;
-  memset (&fglobal_copy[0], 0, myglobalsize * 3 * sizeof (double));
-  for (int i = 0; i < atom->nlocal; i++) {
-    reduce_id = atom->tag[i] - 1; 
-    for (int j = 0; j < domain->dimension; j++) {
-      fglobal_copy[idx2_r(reduce_id, j, 3)] = f[i][j];
-    }
-  }
-  MPI_Allreduce (fglobal_copy, fglobal_ref, ndofs, MPI_DOUBLE, MPI_SUM, world);
-
-  /* no energy or virial updates. */
-  int eflag = 0;
-  int vflag = 0;
-
-  /* local map, per-processor flag to indicate the atom is on that task. */
-  int m, myatom;
-
-  /* parent mass will be broadcast from whatever task it lives on. */
-  double mass;
-
   /* set up a map if none exists so we can incrementally loop through all dofs
    * regardless of the location of the atom data. */
   int mapflag = 0;
@@ -204,9 +182,9 @@ void ComputeHessian::compute_vector(void) {
     atom->map_set();
   }
 
-  /* embedded indices, and inner hessian quantities. */
-  double difference, mass_weight;
-  int index_a, index_b, global_atom_a, global_atom_b;
+  /* no energy or virial updates. */
+  int eflag = 0;
+  int vflag = 0;
 
   /* allow pair and kspace compute to be turned off via modify flags. */
   if (force->pair && force->pair->compute_flag)
@@ -218,15 +196,46 @@ void ComputeHessian::compute_vector(void) {
   else
     kspace_compute_flag = 0;
 
+  /* do a standard force call to get the reference forces. */
   comm->forward_comm();
+  force_clear();
   if (modify->n_pre_force) modify->pre_force(vflag);
 
+  if (pair_compute_flag) force->pair->compute(eflag, vflag);
+
+  if (atom->molecular) {
+    if (force->bond) force->bond->compute(eflag, vflag);
+    if (force->angle) force->angle->compute(eflag, vflag);
+    if (force->dihedral) force->dihedral->compute(eflag, vflag);
+    if (force->improper) force->improper->compute(eflag, vflag);
+  }
+
+  if (kspace_compute_flag) force->kspace->compute(eflag, vflag);
+  if (force->newton) comm->reverse_comm();
+  if (modify->n_post_force) modify->post_force(vflag);
+
+  /* construct fglobal_ref by explicit scatter and reduce to preserve atom-id
+   * ordering. */
+  int m, reduce_m;
+  memset (&fglobal_copy[0], 0, myglobalsize * 3 * sizeof (double));
+  for (int i = 1; i <= atom->natoms; i++) {
+    m = atom->map(i);
+    if (atom->mask[m]) { // in the future implement groupbit properly
+      reduce_m = atom->tag[m] - 1;
+      for (int j = 0; j < domain->dimension; j++)
+        fglobal_copy[idx2_c(reduce_m, j, atom->natoms)] = flocal[m][j];
+    }
+  }
+  MPI_Allreduce (fglobal_copy, fglobal_ref, ndofs, MPI_DOUBLE, MPI_SUM, world);
+
   /* do numerical hessian compute by forward differences. */
+  int n, reduce_n, myatom, index_a, index_b, global_atom_a, global_atom_b;
+  double mass, difference, mass_weight, xstore;
   for (int i = 1; i <= atom->natoms; i++) {
 
     myatom = 0;
     m = atom->map(i);
-    if (m >= 0 && m < atom->nlocal) {
+    if (atom->mask[m]) {
       myatom = 1;
 
       /* global ids in lammps are handled by 1-based indexing, while everything
@@ -245,10 +254,15 @@ void ComputeHessian::compute_vector(void) {
 
     for (int j = 0; j < domain->dimension; j++) {
       /* increment the dof by epsilon on the right task. */
-      if (myatom) xlocal[m][j] += epsilon;
+      if (myatom) {
+        xstore = xlocal[m][j];
+        xlocal[m][j] += epsilon;
+      }
 
       /* standard force call. */
+      comm->forward_comm();
       force_clear();
+      if (modify->n_pre_force) modify->pre_force(vflag);
 
       if (pair_compute_flag) force->pair->compute(eflag, vflag);
 
@@ -261,18 +275,21 @@ void ComputeHessian::compute_vector(void) {
 
       if (kspace_compute_flag) force->kspace->compute(eflag, vflag);
 
-
       /* put the original position back. */
-      if (myatom)
-        xlocal[m][j] = x[m][j];
+      if (myatom) xlocal[m][j] = xstore;
+
+      if (force->newton) comm->reverse_comm();
+      if (modify->n_post_force) modify->post_force(vflag);
 
       /* construct fglobal_new by explicit scatter and reduce to preserve
        * atom-id ordering. */
       memset (&fglobal_copy[0], 0, myglobalsize * 3 * sizeof (double));
-      for (int k = 0; k < atom->nlocal; k++) {
-        reduce_id = atom->tag[k] - 1;
-        for (int l = 0; l < 3; l++) {
-          fglobal_copy[idx2_r(reduce_id, l, 3)] = flocal[k][l];
+      for (int k = 1; k <= atom->natoms; k++) {
+        n = atom->map(k);
+        if (atom->mask[n]) {
+          reduce_n = atom->tag[n] - 1;
+          for (int l = 0; l < domain->dimension; l++)
+            fglobal_copy[idx2_c(reduce_n, l, atom->natoms)] = flocal[n][l];
         }
       }
       MPI_Allreduce (fglobal_copy, fglobal_new, ndofs, MPI_DOUBLE, MPI_SUM, world);
@@ -280,31 +297,33 @@ void ComputeHessian::compute_vector(void) {
       /* compute the difference (not using symmetry so we can do an in-place
        * reduciton). */
       index_a = j + 3 * global_atom_a;
-      for (int k = 0; k < atom->nlocal; k++) {
+      for (int k = 1; k <= atom->natoms; k++) {
+        n = atom->map(k);
+        if (atom->mask[n]) {
+          global_atom_b = atom->tag[n] - 1;
 
-        /* don't need to broadcast the second mass because it will only be used
-         * on this rank. */
-        if (atom->rmass)
-          mass_weight = 1 / sqrt(mass * atom->rmass[k]);
-        else
-          mass_weight = 1 / sqrt(mass * atom->mass[atom->type[k]]);
+          /* don't need to broadcast the second mass because it will only be used
+           * on this rank. */
+          if (atom->rmass)
+            mass_weight = 1 / sqrt(mass * atom->rmass[n]);
+          else
+            mass_weight = 1 / sqrt(mass * atom->mass[atom->type[n]]);
 
-        /* once again, global arrays use 1-based indexing, so have to rebase
-         * them to 0. */
-        global_atom_b = atom->tag[k] - 1;
-        for (int l = 0; l < domain->dimension; l++) {
-          index_b = l + 3 * global_atom_b;
-          difference =
-              fglobal_ref[idx2_r(global_atom_b, l, 3)] - fglobal_new[idx2_r(global_atom_b, l, 3)];
-          hessian[idx2_c(index_a, index_b, ndofs)] =
-              difference * iepsilon * mass_weight;
+          /* once again, global arrays use 1-based indexing, so have to rebase
+           * them to 0. */
+          for (int l = 0; l < domain->dimension; l++) {
+            index_b = l + 3 * global_atom_b;
+            difference =
+                fglobal_ref[idx2_c(global_atom_b, l, atom->natoms)] - \
+                fglobal_new[idx2_c(global_atom_b, l, atom->natoms)];
+
+            hessian[idx2_c(index_a, index_b, ndofs)] =
+                difference * iepsilon * mass_weight;
+          }
         }
       }
     }
   }
-
-  if (force->newton) comm->reverse_comm();
-  if (modify->n_post_force) modify->post_force(vflag);
 
   /* only reduce the hessian to the root task. */
   MPI_Reduce(MPI_IN_PLACE, hessian, nhessianelements, MPI_DOUBLE, MPI_SUM, 0, world);
