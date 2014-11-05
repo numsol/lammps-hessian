@@ -8,13 +8,6 @@
    certain rights in this software.  This software is distributed under
    the GNU General Public License.
 
-   LAMMPS-HESSIAN - Copyright (2014) Anthony B. Costa.
-   anthony.costa@numericalsolutions.org, Numerical Solutions, Inc.
-
-   A compute module for the LAMMPS software package  which provides a 
-   method of generating the forward-difference numerical Hessian matrix 
-   on the fly duing any LAMMPS simulation.
-
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
