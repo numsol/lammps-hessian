@@ -18,6 +18,7 @@
 #include "neighbor.h"
 #include "compute_hessian.h"
 #include "atom.h"
+#include "atom_vec.h"
 #include "error.h"
 #include "update.h"
 #include "memory.h"
@@ -57,9 +58,6 @@ ComputeHessian::ComputeHessian(LAMMPS *lmp, int narg, char **arg)
   mylocalsize = 0;
   myglobalsize = 0;
 
-  xlocal = flocal = NULL;
-  torquelocal = NULL;
-  erforcelocal = delocal = drholocal = NULL;
   fglobal_ref = fglobal_new = fglobal_copy = NULL;
   hessian = NULL;
 }
@@ -67,14 +65,6 @@ ComputeHessian::ComputeHessian(LAMMPS *lmp, int narg, char **arg)
 /* ---------------------------------------------------------------------- */
 
 ComputeHessian::~ComputeHessian() {
-  memory->destroy(xlocal);
-  memory->destroy(flocal);
-
-  memory->destroy(torquelocal);
-  memory->destroy(erforcelocal);
-  memory->destroy(delocal);
-  memory->destroy(drholocal);
-
   free(fglobal_ref);
   free(fglobal_new);
   free(fglobal_copy);
@@ -94,52 +84,9 @@ void ComputeHessian::compute_vector(void) {
     error->all(FLERR,
                "Atom IDs must be consecutive for Hessian compute");
 
-  /* set flags for what arrays to clear in force_clear(). */
-  /* if they exist they are cleared and then replaced later. */
-  torqueflag = erforceflag = e_flag = rho_flag = 0;
-  if (atom->torque_flag)
-    torqueflag = 1;
-  if (atom->erforce_flag)
-    erforceflag = 1;
-  if (atom->e_flag)
-    e_flag = 1;
-  if (atom->rho_flag)
-    rho_flag = 1;
-
   /* get pointers to all the original data. */
   double **x = atom->x;
   double **f = atom->f;
-  double **torque = atom->torque;
-  double *erforce = atom->erforce;
-  double *de = atom->de;
-  double *drho = atom->drho;
-
-  /* only grow into larger size arrays for vectors which are not being managed
-   * explicitly by mpi or returned. */
-  int needlocalsize;
-  if (force->newton)
-    needlocalsize = atom->nlocal + atom->nghost;
-  else
-    needlocalsize = atom->nlocal;
-
-  if (needlocalsize > mylocalsize) {
-    memory->grow(xlocal, needlocalsize, 3, "hessian:xlocal");
-    memory->grow(flocal, needlocalsize, 3, "hessian:flocal");
-
-    if (torqueflag)
-      memory->grow(torquelocal, needlocalsize, 3, "hessian:torquelocal");
-    if (erforceflag)
-      memory->grow(erforcelocal, needlocalsize, "hessian:erforcelocal");
-    if (e_flag)
-      memory->grow(delocal, needlocalsize, "hessian:delocal");
-    if (rho_flag)
-      memory->grow(drholocal, needlocalsize, "hessian:drholocal");
-
-    mylocalsize = needlocalsize;
-  }
-
-  /* copy the data from lammps atom class to local array. */
-  memcpy(&xlocal[0][0], &x[0][0], needlocalsize * 3 * sizeof(double));
 
   /* the global force and hessian arrays must be explicitly the correct size. */
   int needglobalsize = atom->natoms;
@@ -163,15 +110,7 @@ void ComputeHessian::compute_vector(void) {
   }
 
   /* a lot of the hessian will be zero, so start there. */
-  memset(hessian, 0, nhessianelements * sizeof(double));
-
-  /* point all the class data to the local storage for now. */
-  atom->x = xlocal;
-  atom->f = flocal;
-  atom->torque = torquelocal;
-  atom->erforce = erforcelocal;
-  atom->de = delocal;
-  atom->drho = drholocal;
+  memset (hessian, 0, nhessianelements * sizeof(double));
 
   /* set up a map if none exists so we can incrementally loop through all dofs
    * regardless of the location of the atom data. */
@@ -220,24 +159,21 @@ void ComputeHessian::compute_vector(void) {
   memset (&fglobal_copy[0], 0, myglobalsize * 3 * sizeof (double));
   for (int i = 1; i <= atom->natoms; i++) {
     m = atom->map(i);
-    if (atom->mask[m]) { // in the future implement groupbit properly
+    if (atom->mask[m]) {
       reduce_m = atom->tag[m] - 1;
       for (int j = 0; j < domain->dimension; j++)
-        fglobal_copy[idx2_c(reduce_m, j, atom->natoms)] = flocal[m][j];
+        fglobal_copy[idx2_c(reduce_m, j, atom->natoms)] = f[m][j];
     }
   }
   MPI_Allreduce (fglobal_copy, fglobal_ref, ndofs, MPI_DOUBLE, MPI_SUM, world);
 
   /* do numerical hessian compute by forward differences. */
-  int n, reduce_n, myatom, index_a, index_b, global_atom_a, global_atom_b;
+  int n, reduce_n, index_a, index_b, global_atom_a, global_atom_b;
   double mass, difference, mass_weight, xstore;
   for (int i = 1; i <= atom->natoms; i++) {
 
-    myatom = 0;
     m = atom->map(i);
     if (atom->mask[m]) {
-      myatom = 1;
-
       /* global ids in lammps are handled by 1-based indexing, while everything
        * local is 0-based. */
       global_atom_a = atom->tag[m] - 1;
@@ -254,9 +190,9 @@ void ComputeHessian::compute_vector(void) {
 
     for (int j = 0; j < domain->dimension; j++) {
       /* increment the dof by epsilon on the right task. */
-      if (myatom) {
-        xstore = xlocal[m][j];
-        xlocal[m][j] += epsilon;
+      if (atom->mask[m]) {
+        xstore = x[m][j];
+        x[m][j] += epsilon;
       }
 
       /* standard force call. */
@@ -276,7 +212,7 @@ void ComputeHessian::compute_vector(void) {
       if (kspace_compute_flag) force->kspace->compute(eflag, vflag);
 
       /* put the original position back. */
-      if (myatom) xlocal[m][j] = xstore;
+      if (atom->mask[m]) x[m][j] = xstore;
 
       if (force->newton) comm->reverse_comm();
       if (modify->n_post_force) modify->post_force(vflag);
@@ -289,7 +225,7 @@ void ComputeHessian::compute_vector(void) {
         if (atom->mask[n]) {
           reduce_n = atom->tag[n] - 1;
           for (int l = 0; l < domain->dimension; l++)
-            fglobal_copy[idx2_c(reduce_n, l, atom->natoms)] = flocal[n][l];
+            fglobal_copy[idx2_c(reduce_n, l, atom->natoms)] = f[n][l];
         }
       }
       MPI_Allreduce (fglobal_copy, fglobal_new, ndofs, MPI_DOUBLE, MPI_SUM, world);
@@ -334,35 +270,31 @@ void ComputeHessian::compute_vector(void) {
     atom->map_style = 0;
   }
 
-  /* point all the original class data back. */
-  atom->x = x;
-  atom->f = f;
-  atom->torque = torque;
-  atom->erforce = erforce;
-  atom->de = de;
-  atom->drho = drho;
+  /* do a standard force call to get the original forces back. */
+  comm->forward_comm();
+  force_clear();
+  if (modify->n_pre_force) modify->pre_force(vflag);
+
+  if (pair_compute_flag) force->pair->compute(eflag, vflag);
+
+  if (atom->molecular) {
+    if (force->bond) force->bond->compute(eflag, vflag);
+    if (force->angle) force->angle->compute(eflag, vflag);
+    if (force->dihedral) force->dihedral->compute(eflag, vflag);
+    if (force->improper) force->improper->compute(eflag, vflag);
+  }
+
+  if (kspace_compute_flag) force->kspace->compute(eflag, vflag);
+  if (force->newton) comm->reverse_comm();
+  if (modify->n_post_force) modify->post_force(vflag);
 }
 
 void ComputeHessian::force_clear() {
-  /* clear global force array. nall includes ghosts only if either newton flag
-   * is set. */
-  int nall;
-  if (force->newton)
-    nall = atom->nlocal + atom->nghost;
-  else
-    nall = atom->nlocal;
+  size_t nbytes;
+  int nlocal = atom->nlocal;
 
-  size_t nbytes = sizeof(double) * nall;
+  nbytes = sizeof(double) * nlocal;
+  if (force->newton) nbytes += sizeof(double) * atom->nghost;
 
-  if (nbytes) {
-    memset(&(atom->f[0][0]), 0, 3 * nbytes);
-    if (torqueflag)
-      memset(&(atom->torque[0][0]), 0, 3 * nbytes);
-    if (erforceflag)
-      memset(&(atom->erforce[0]), 0, nbytes);
-    if (e_flag)
-      memset(&(atom->de[0]), 0, nbytes);
-    if (rho_flag)
-      memset(&(atom->drho[0]), 0, nbytes);
-  }
+  if (nbytes) memset (&atom->f[0][0], 0, 3 * nbytes);
 }

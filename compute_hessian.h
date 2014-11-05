@@ -8,6 +8,13 @@
    certain rights in this software.  This software is distributed under
    the GNU General Public License.
 
+   LAMMPS-HESSIAN - Copyright (2014) Anthony B. Costa.
+   anthony.costa@numericalsolutions.org, Numerical Solutions, Inc.
+
+   A compute module for the LAMMPS software package  which provides a 
+   method of generating the forward-difference numerical Hessian matrix 
+   on the fly duing any LAMMPS simulation.
+
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
@@ -28,35 +35,28 @@ ComputeStyle(hessian, ComputeHessian)
 
 namespace LAMMPS_NS {
 
-class ComputeHessian : public Compute {
-public:
-  ComputeHessian(class LAMMPS *, int, char **);
-  ~ComputeHessian();
-  void init() {}
-  void compute_vector();
+  class ComputeHessian : public Compute {
+  public:
+    ComputeHessian(class LAMMPS *, int, char **);
+    ~ComputeHessian();
+    void init() {}
+    void compute_vector();
+  
+  protected:
+    int mylocalsize;
+    int myglobalsize;
+  
+    double *fglobal_ref, *fglobal_new, *fglobal_copy;
+    double *hessian;
+  
+    double epsilon, iepsilon;
+  
+    int pair_compute_flag;
+    int kspace_compute_flag;
+  
+    void force_clear();
+  };
 
-protected:
-  int mylocalsize;
-  int myglobalsize;
-
-  double **xlocal, **flocal;
-  double **torquelocal, *erforcelocal, *delocal, *drholocal;
-  double *fglobal_ref, *fglobal_new, *fglobal_copy;
-  double *hessian;
-
-  double epsilon, iepsilon;
-
-  int pair_compute_flag;
-  int kspace_compute_flag;
-
-  int external_force_clear;
-
-  int torqueflag, erforceflag;
-  int e_flag, rho_flag;
-
-  void force_clear();
-
-};
 }
 
 #endif
